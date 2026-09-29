@@ -1,7 +1,7 @@
 # CC2 Monitor — Design
 
 Date: 2026-09-30
-Status: draft, awaiting review
+Status: approved 2026-09-30
 
 ## Goal
 
