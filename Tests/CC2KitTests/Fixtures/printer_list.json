@@ -1,0 +1,41 @@
+{
+  "00000000-0000-4000-8000-000000000001": {
+    "accessCode": "123456",
+    "addTime": 1788702838,
+    "authMode": 2,
+    "extraInfo": "{\"caFile\":\"\",\"ignoreCertRevocation\":false}",
+    "firmwareVersion": "02.01.00.00",
+    "host": "192.168.130.97",
+    "hostType": "ElegooLink",
+    "isAdded": false,
+    "isPhysicalPrinter": true,
+    "lastActiveTime": 1790719743,
+    "mainboardId": "CC2SERIAL000001",
+    "modifyTime": 1790719743,
+    "networkType": 0,
+    "password": "",
+    "pinCode": "",
+    "port": 0,
+    "printCapabilities": {
+      "supportsAutoBedLeveling": true,
+      "supportsAutoRefill": true,
+      "supportsFilamentMapping": true,
+      "supportsHeatedBedSwitching": true,
+      "supportsTimeLapse": true
+    },
+    "printerId": "00000000-0000-4000-8000-000000000001",
+    "printerModel": "Elegoo Centauri Carbon 2",
+    "printerName": "Elegoo Centauri Carbon 2",
+    "protocolVersion": "",
+    "serialNumber": "CC2SERIAL000001",
+    "systemCapabilities": {
+      "canGetDiskInfo": true,
+      "canSetPrinterName": true,
+      "supportsMultiFilament": true
+    },
+    "token": "",
+    "username": "",
+    "vendor": "Elegoo",
+    "webUrl": "file:////Applications/ElegooSlicer.app/Contents/Resources/plugins/elegoolink/web/lan_service_web/index.html"
+  }
+}
