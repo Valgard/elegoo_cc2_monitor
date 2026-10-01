@@ -41,4 +41,5 @@ swift test                                    # unit tests
 CC2_LIVE=1 swift test --filter LiveSessionTests   # against the real printer
 swift format lint --strict --recursive Sources Tests
 uv run tools/probe_cc2.py --help              # protocol probe used for the fixtures
+uv run tools/make_icon.py                     # Assets/AppIcon-art.jpeg → Assets/AppIcon.png (icon master)
 ```
