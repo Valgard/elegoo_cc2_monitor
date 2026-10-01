@@ -79,6 +79,20 @@ struct StatusMergerTests {
         #expect(applied.progress == 40)
     }
 
+    @Test func idleSnapshotFixture() throws {
+        let snapshot = try #require(
+            CC2Protocol.decodeSnapshot(Data(contentsOf: fixtureURL("get_basic_info_response", "json"))))
+        var status = PrinterStatus()
+        status.fileName = "old.gcode"
+        let applied = StatusMerger.apply(status, snapshot: snapshot)
+        #expect(applied.machineState == 1)
+        #expect(applied.progress == 0)
+        #expect(applied.nozzleTemp == 24)
+        #expect(applied.bedTemp == 24)
+        #expect(applied.fileName == nil)  // idle printer reports "" — no file, not an empty name
+        #expect(applied.totalLayers == nil)
+    }
+
     @Test(arguments: [(nil, 5, false), (4, 5, false), (4, 7, true), (7, 7, false)] as [(Int?, Int, Bool)])
     func hasGap(lastId: Int?, newId: Int, expected: Bool) {
         #expect(StatusMerger.hasGap(lastId: lastId, newId: newId) == expected)

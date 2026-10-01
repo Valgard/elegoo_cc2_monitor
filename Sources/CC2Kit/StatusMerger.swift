@@ -12,7 +12,10 @@ public enum StatusMerger {
         s.currentLayer = delta.printStatus?.currentLayer ?? s.currentLayer
         s.totalLayers = delta.printStatus?.totalLayers ?? s.totalLayers
         s.remainingSeconds = delta.printStatus?.remainingTimeSec ?? s.remainingSeconds
-        s.fileName = delta.printStatus?.filename ?? s.fileName
+        if let filename = delta.printStatus?.filename {
+            // An idle printer reports "": no file, which is not the same as "unchanged".
+            s.fileName = filename.isEmpty ? nil : filename
+        }
         return s
     }
 
