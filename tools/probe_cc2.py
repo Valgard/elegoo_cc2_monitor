@@ -82,10 +82,12 @@ def cmd_capture(args, printer) -> None:
 
 
 def register(client, inbox, sn: str, client_id: str) -> bytes | None:
-    client.subscribe(f"elegoo/{sn}/{client_id}/register_response")
-    client.subscribe(f"elegoo/{sn}/{client_id}/api_response")
+    # Mirrors the slicer's LAN plugin: QoS 1, and client_id alongside request_id.
+    client.subscribe(f"elegoo/{sn}/{client_id}/register_response", qos=1)
+    client.subscribe(f"elegoo/{sn}/{client_id}/api_response", qos=1)
     time.sleep(0.5)
-    client.publish(f"elegoo/{sn}/api_register", json.dumps({"request_id": client_id}))
+    payload = {"request_id": client_id, "client_id": client_id}
+    client.publish(f"elegoo/{sn}/api_register", json.dumps(payload), qos=1)
     return wait_for(inbox, f"elegoo/{sn}/{client_id}/register_response", 5)
 
 

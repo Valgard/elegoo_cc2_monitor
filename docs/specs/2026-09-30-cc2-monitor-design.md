@@ -1,7 +1,7 @@
 # CC2 Monitor — Design
 
 Date: 2026-09-30
-Status: approved 2026-09-30
+Status: approved 2026-09-30, updated 2026-10-01 with measurements
 
 ## Goal
 
@@ -35,8 +35,8 @@ conversation (2026-09-29/30):
    registration is refused, fall back silently to listen-only and show
    "limited status". **The slicer is never displaced:** a slicer that is
    already connected keeps working when the app starts, and a slicer started
-   while the app is running can still connect. (To be verified against the
-   printer as the first implementation step, see open point 2.)
+   while the app is running can still connect. (Verified against the
+   printer on 2026-10-01, see "Client-slot decision".)
 6. Zero setup on first launch by importing the credentials from ElegooSlicer;
    afterwards the app is independent of the slicer (own copy, access code in
    the Keychain); settings dialog as fallback.
@@ -83,61 +83,45 @@ MQTT topics (`<sn>` = printer serial number):
   messages):
   `{"id":26580,"method":6000,"result":{"extruder":{"temperature":224},"print_status":{"current_layer":68,"remaining_time_sec":2385}}}`
 
-Everything below comes from the ElegooSlicer LAN plugin
-(`ElegooSlicer.app/Contents/Resources/plugins/elegoolink/web/lan_service_web/index.html`)
-and has **not** been observed on the wire by us:
+Registration, snapshot and heartbeat — first read from the ElegooSlicer LAN
+plugin (`ElegooSlicer.app/Contents/Resources/plugins/elegoolink/web/lan_service_web/index.html`),
+then **measured against the printer on 2026-10-01** (printer idle):
 
-- `elegoo/<sn>/api_register` with `{"request_id":"<client_id>"}`, answered on
-  `elegoo/<sn>/<request_id>/register_response`. The plugin counts `error` =
-  `"ok"` **or** `"already registered"` as success; `"too many clients"` is the
-  refusal because of the client limit.
-- `elegoo/<sn>/<client_id>/api_request` and `…/api_response` — request/response
-  after registration.
-- **Snapshot:** `GetBasicInfo` (method 1002). The plugin treats its response as
-  the full status and re-requests it whenever the auto-report `id` skips a
-  value. (`GetMachineStatus` 1003 exists in the method enum but is never
-  called.)
-- **One id sequence for two report types:** besides `MessageAutoReport` (6000)
-  the plugin handles `SystemAutoReport` (6008) and tracks both with the same
-  counter. Gap detection must therefore follow the id across both methods,
-  not across 6000 alone, or it fires falsely.
-- **Heartbeat:** `{"type":"PING"}` on `api_request`, answered with
-  `{"type":"PONG"}`. (The enum's `Heartbeat` 1052 is never sent.)
+- **Register:** publish `{"request_id":"<id>","client_id":"<id>"}` with **QoS 1**
+  to `elegoo/<sn>/api_register`; the answer arrives on
+  `elegoo/<sn>/<id>/register_response` as `{"client_id":"<id>","error":"ok"}`.
+  Without `client_id` and QoS 1 the printer does not answer. Any client id
+  works (`cc2mon` + 8 hex was accepted; the slicer uses `1_PC_<n>` natively and
+  `0cli<6 hex>` in its device page).
+- **Already registered:** registering the same id again — even after the MQTT
+  connection was closed — returns `"already registered"`; it counts as success.
+- **Client limit:** `{"client_id":"<id>","error":"too many clients"}`. With
+  the slicer connected, the fifth of five new registrations was refused after
+  four earlier probe registrations; the limit is therefore about 10.
+- **Release:** a registration without `PING` is still held after 60 s and gone
+  after 120 s. The slicer occupies two slots (native client and device page),
+  both freed when it quits.
+- **Snapshot:** `{"id":1,"method":1002,"params":{}}` on
+  `elegoo/<sn>/<id>/api_request` → `{"id":1,"method":1002,"result":{…}}` on
+  `…/api_response`, with the same sections as the auto-reports. It carries every
+  status-bar field except `print_status.total_layer`, which was absent on the
+  idle printer; a field the snapshot lacks is reset to unknown (see
+  "Behaviour"). On an idle printer `filename` is the empty string.
+- **Heartbeat:** `{"type":"PING"}` → `{"type":"PONG"}`.
+- **Listen-only** works without any registered client: `api_status` arrived
+  with no client registered. On an idle printer reports come in bursts with
+  pauses of up to 15 s. The `id` is one global sequence for all subscribers.
+- **Wrong access code:** CONNACK return code 5 (`notAuthorized`).
+- **Gap detection** follows the `id` across `MessageAutoReport` (6000) and
+  `SystemAutoReport` (6008); the plugin tracks both with one counter. (No 6008
+  frame has been observed yet.)
 
-Caveat: that plugin connects via MQTT-over-WebSocket on port 9001; the slicer's
-actual CC2 connection is its native client on TCP 1883. Payloads are expected
-to match but are confirmed against the printer, not assumed.
-
-**Open points, resolved as the first implementation step (against the running
-printer, before any UI work depends on them):**
-
-1. The exact payloads of `api_register`, `GetBasicInfo` and `PING`, and their
-   responses — recorded as test fixtures. In particular: does the
-   `GetBasicInfo` response carry every status-bar field? The resync rule below
-   relies on it; any field it lacks is marked as not resyncable.
-2. **Client slot:** how many clients may register, and whether a slot is freed
-   when a client disconnects or stops sending `PING`. Count every client the
-   slicer brings: its native client (`1_PC_…`) and, when its device page is
-   open, the LAN web plugin, which opens its own MQTT connection on port 9001.
-   Acceptance tests, both required: (a) slicer already connected, then start
-   the app — the slicer keeps working; (b) app registered, then start the
-   slicer — the slicer connects. Outcome, in this order:
-   - both pass while the app stays registered → **stay registered** (`PING`
-     heartbeat);
-   - otherwise, if a slot is released by a mechanism the measurement finds →
-     **register briefly**: register, fetch the snapshot, release; repeat only
-     for a resync. Re-run (a) and (b) in this mode;
-   - otherwise → **never register**: the app runs permanently in
-     listen-only mode (`limited`). The slicer's priority wins over the full
-     status.
-
-   The spec is updated with the result.
-3. **Listen-only without any registered client:** does the printer publish
-   `api_status` when no client is registered at all? (The 2026-09-29 capture
-   ran while the slicer was connected.) If not, limited mode has no data
-   source and must say so ("no status").
-4. The MQTT return code for a **wrong** access code (only a missing username
-   was tried: "Not authorized").
+**Client-slot decision (open point of the approved spec, measured
+2026-10-01):** acceptance test (a) — slicer connected, then the printer's slots
+filled up to the limit — the slicer kept working; test (b) — slots full, slicer
+quit and restarted — the slicer connected again. Both pass while other clients
+stay registered, so the app uses registration mode **stay**: it registers at
+startup and holds its one slot with `PING` every 10 s.
 
 ## Structure
 
@@ -164,7 +148,7 @@ SwiftPM, pinned to the stable 2.x line (`from: "2.13.0"`), not the
 | `MJPEGStream` | Opens the camera URL with `URLSession` bytes, feeds `MJPEGParser`, exposes `AsyncStream<CGImage>`. | `URLSession`, `MJPEGParser` |
 | `PrinterStatus` | Value type: machine state, progress %, current/total layer, remaining seconds, file name, nozzle and bed temperature, last seen `api_status` id, status-channel state (`connecting`, `online`, `limited`, `registrationFailed`, `offline`, `authFailed`). All print fields optional ("unknown until seen"). | nothing |
 | `StatusMerger` | Pure functions: `merge(PrinterStatus, delta) -> PrinterStatus` (absent field = unchanged), `apply(PrinterStatus, snapshot) -> PrinterStatus` for the `GetBasicInfo` response, `resetPrintFields(PrinterStatus)` (sets every print field — state, progress, layers, remaining time, file name, both temperatures — to unknown; connection states untouched), and `hasGap(lastId, newId) -> Bool` (`newId - lastId > 1`, over the ids of all auto-report methods, 6000 and 6008). | nothing |
-| `MQTTStatusClient` | Connects via `mqtt-nio`, subscribes to `api_status`, registers, requests the `GetBasicInfo` snapshot, sends `PING` while registered. Registration mode (stay / brief / never) is a setting fixed by open point 2. `"ok"`/`"already registered"` = registered; `"too many clients"` → `limited`; registration timeout or an unexpected response → `registrationFailed` (also listen-only, but logged with the raw response, so a wrong payload is not mistaken for a full printer). Emits decoded messages as an `AsyncStream`. | `mqtt-nio` |
+| `MQTTStatusClient` | Connects via `mqtt-nio`, subscribes to `api_status`, registers, requests the `GetBasicInfo` snapshot, sends `PING` while registered. Registration mode is **stay** (measured, see "Client-slot decision"); `brief`/`never` remain available as fallbacks. `"ok"`/`"already registered"` = registered; `"too many clients"` → `limited`; registration timeout or an unexpected response → `registrationFailed` (also listen-only, but logged with the raw response, so a wrong payload is not mistaken for a full printer). Emits decoded messages as an `AsyncStream`. | `mqtt-nio` |
 | `PrinterMonitor` | `@Observable` model owned by the app: wires `MQTTStatusClient` → `StatusMerger` → `status`, and `MJPEGStream` → `latestFrame` plus a separate camera state (`live`, `reconnecting`). Owns reconnect timing and resync (see "Behaviour"). | the units above |
 | `MonitorWindow` | SwiftUI view: camera image (aspect-fit), status bar, always-on-top toggle, settings sheet. | `PrinterMonitor` |
 
@@ -195,16 +179,15 @@ keeps working.
   - listen-only (`limited`, `registrationFailed`, or mode *never*): reset the
     print fields to unknown (`–`).
 
-  A field the snapshot does not carry (open point 1) is reset instead of kept.
+  A field the snapshot does not carry (e.g. `total_layer` on an idle printer) is reset instead of kept.
 - **Channels fail independently:** the status channel shows "offline" when
   MQTT is unreachable; the camera shows its own "reconnecting" state. Each
   retries every 5 s. When both are down, the window reads "printer
   unreachable".
 - **Camera stream drops:** the last frame stays visible, dimmed, with a
   "reconnecting" overlay until frames arrive again.
-- **Wrong access code** (MQTT connect refused with "bad username or password"
-  or "not authorized" — both are treated alike until the measurement settles
-  which one the printer sends): status `authFailed`, the settings sheet opens
+- **Wrong access code** (MQTT connect refused with return code 5,
+  `notAuthorized`, as measured; code 4 is treated alike): status `authFailed`, the settings sheet opens
   once. This is the one exception to automatic reconnect: no retry until the
   settings change.
 - **No stored config and the import fails** (any failure listed under
@@ -230,8 +213,8 @@ keeps working.
   two CC2 entries (latest `lastActiveTime` wins).
 - Registration, snapshot, `PING`, client slot (tests a and b), listen-only
   without any registered client, and wrong-code return code:
-  verified empirically against the printer as the first plan step (see "Open
-  points"); the recorded responses become fixtures, including one for
-  `"already registered"`.
+  verified against the printer on 2026-10-01 (see "Client-slot decision");
+  the recorded responses are fixtures, including `"already registered"` and
+  `"too many clients"`.
 - UI: manual check against the running printer (camera visible, status updates,
   pull network cable → offline → reconnect).
