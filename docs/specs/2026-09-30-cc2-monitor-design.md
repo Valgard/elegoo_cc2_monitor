@@ -143,13 +143,13 @@ SwiftPM, pinned to the stable 2.x line (`from: "2.13.0"`), not the
 
 | Unit | Responsibility | Depends on |
 |---|---|---|
-| `PrinterConfig` | Host, serial number, access code. Imports from ElegooSlicer's `~/Library/Application Support/ElegooSlicer/user/printer_list.json` (a JSON object keyed by printer UUID; the entry whose `printerModel` contains "Centauri Carbon 2", and among several such entries the one with the latest `lastActiveTime`; `isAdded` is ignored — it is `false` on the real CC2 entry); the import fails if the file is missing or unparseable, has no CC2 entry, or that entry lacks `host`, `serialNumber` or a non-empty `accessCode`; persists host and serial in `UserDefaults`, the access code in the Keychain. | Foundation, Security |
+| `PrinterConnection`, `SlicerImport`, `ConfigStore` | Host, serial number, access code (never shown by `description`/reflection). `SlicerImport` reads from ElegooSlicer's `~/Library/Application Support/ElegooSlicer/user/printer_list.json` (a JSON object keyed by printer UUID; the entry whose `printerModel` contains "Centauri Carbon 2", and among several such entries the one with the latest `lastActiveTime`; `isAdded` is ignored — it is `false` on the real CC2 entry); the import fails if the file is missing or unparseable, has no CC2 entry, or that entry lacks a non-empty `host`, `serialNumber` or `accessCode`, or its host is not a plain host name/IPv4 address (`cameraURL` is nil — the same check the settings sheet applies). `ConfigStore` persists host and serial in `UserDefaults`, the access code in the Keychain; a Keychain read error is reported, not treated as "nothing stored". | Foundation, Security |
 | `MJPEGPartCollector` | Pure assembler for the parts URLSession delivers: URLSession splits a `multipart/x-mixed-replace` response itself (each part arrives as a new response, boundary lines removed — measured 2026-10-01). A part is a frame once its announced length is reached; incomplete parts are dropped. | nothing |
 | `MJPEGStream` | Opens the camera URL with a `URLSession` data task and a delegate, feeds `MJPEGPartCollector`, exposes `AsyncThrowingStream<CGImage, Error>`. (The async `bytes(for:)` API fails on multipart responses with `NSURLErrorDomain -1`.) | `URLSession`, `MJPEGPartCollector` |
 | `PrinterStatus` | Value type: machine state, progress %, current/total layer, remaining seconds, file name, nozzle and bed temperature, last seen `api_status` id, status-channel state (`connecting`, `online`, `limited`, `registrationFailed`, `offline`, `authFailed`). All print fields optional ("unknown until seen"). | nothing |
 | `StatusMerger` | Pure functions: `merge(PrinterStatus, delta) -> PrinterStatus` (absent field = unchanged), `apply(PrinterStatus, snapshot) -> PrinterStatus` for the `GetBasicInfo` response, `resetPrintFields(PrinterStatus)` (sets every print field — state, progress, layers, remaining time, file name, both temperatures — to unknown; connection states untouched), and `hasGap(lastId, newId) -> Bool` (`newId - lastId > 1`, over the ids of all auto-report methods, 6000 and 6008). | nothing |
 | `MQTTStatusClient` | Connects via `mqtt-nio`, subscribes to `api_status`, registers, requests the `GetBasicInfo` snapshot, sends `PING` while registered. Registration mode is **stay** (measured, see "Client-slot decision"); `brief`/`never` remain available as fallbacks. `"ok"`/`"already registered"` = registered; `"too many clients"` → `limited`; registration timeout or an unexpected response → `registrationFailed` (also listen-only, but logged with the raw response, so a wrong payload is not mistaken for a full printer). Emits decoded messages as an `AsyncStream`. | `mqtt-nio` |
-| `PrinterMonitor` | `@Observable` model owned by the app: wires `MQTTStatusClient` → `StatusMerger` → `status`, and `MJPEGStream` → `latestFrame` plus a separate camera state (`live`, `reconnecting`). Owns reconnect timing and resync (see "Behaviour"). | the units above |
+| `PrinterMonitor` | `@Observable` model owned by the app: wires `MQTTStatusClient` → `StatusMerger` → `status`, and `MJPEGStream` → `latestFrame` plus a separate camera state (`connecting`, `live`, `reconnecting`). Owns reconnect timing and resync (see "Behaviour"). | the units above |
 | `MonitorWindow` | SwiftUI view: camera image (aspect-fit), status bar, always-on-top toggle, settings sheet. | `PrinterMonitor` |
 
 ## Data flow
@@ -175,7 +175,7 @@ keeps working.
   unchanged fields, a change sent while disconnected would otherwise be lost.
   After every status reconnect, and whenever `hasGap` is true:
   - registration mode *stay*: request a fresh `GetBasicInfo` snapshot;
-  - registration mode *brief*: register, fetch the snapshot, release;
+  - registration mode *brief*: register, fetch the snapshot, and let the slot lapse (no `PING`);
   - listen-only (`limited`, `registrationFailed`, or mode *never*): reset the
     print fields to unknown (`–`).
 
@@ -186,12 +186,31 @@ keeps working.
   unreachable".
 - **Camera stream drops:** the last frame stays visible, dimmed, with a
   "reconnecting" overlay until frames arrive again.
+- **Headline** (small badge in the status bar): "Zugangscode falsch" (auth
+  failed), "Drucker nicht erreichbar" (status offline and camera not live),
+  "Status offline" (status offline, camera live), "Eingeschränkter Status"
+  (limited or registration failed). While a reconnect attempt is running the
+  last "offline" state stays visible instead of flickering away.
+- **Registration retries:** a refused or failed registration (answer or 5 s
+  timeout) is retried every 60 s, with at most one retry pending; an "ok" that
+  arrives after the timeout still counts.
+- **Dead-link detection:** MQTT publishes and pings time out after 5 s. A
+  registered session in mode *stay* sends `PING` every 10 s and drops the
+  session when no `PONG` arrived for three intervals; any other session sends
+  an MQTT ping every 10 s. A failed publish or ping ends the session, which
+  then reconnects as above.
+- **Report types:** only `MessageAutoReport` (6000) changes status fields;
+  `SystemAutoReport` (6008) only advances the id. A snapshot answer counts only
+  for method 1002 with `error_code` 0.
+- **New job:** when the file name changes from one known name to another (or
+  to none), current and total layers are cleared unless the same report
+  carries them.
 - **Wrong access code** (MQTT connect refused with return code 5,
   `notAuthorized`, as measured; code 4 is treated alike): status `authFailed`, the settings sheet opens
   once. This is the one exception to automatic reconnect: no retry until the
   settings change.
 - **No stored config and the import fails** (any failure listed under
-  `PrinterConfig`): settings sheet opens on launch, stating why the import
+  `SlicerImport`) or the Keychain cannot be read: settings sheet opens on launch, stating why the import
   failed.
 - **Access code is a secret:** never logged, never shown in plain text in the
   UI (secure field).
@@ -204,15 +223,19 @@ keeps working.
   2026-09-29 (committed as fixtures) — deltas that omit fields, deltas that
   change one nested field, `hasGap` on consecutive and skipped ids and on
   interleaved 6000/6008 ids, `resetPrintFields`, and the `GetBasicInfo`
-  snapshot once its format is recorded.
+  snapshots recorded idle and printing; error answers rejected.
 - `MJPEGPartCollector`: unit tests for a part completed by its announced
   length, a part without length completed by the next part, an incomplete part
   dropped, an empty part. `MJPEGStream` itself: live test against the printer
   (`CC2_LIVE=1`).
-- `PrinterConfig`: import from a fixture copy of `printer_list.json` (with a
+- `SlicerImport` / `ConfigStore`: import from a fixture copy of `printer_list.json` (with a
   dummy access code), missing file, unparseable file, file without a CC2
   entry, CC2 entry with empty `accessCode`, `isAdded: false` still imported,
-  two CC2 entries (latest `lastActiveTime` wins).
+  two CC2 entries (latest `lastActiveTime` wins), invalid host rejected,
+  first-generation Centauri Carbon not imported, Keychain read error reported.
+- `RegistrationTracker` / `Liveness`: late "ok" after a timeout, refusal and
+  failure schedule one retry, a late refusal does not schedule a second, keep-
+  alive choice per mode.
 - Registration, snapshot, `PING`, client slot (tests a and b), listen-only
   without any registered client, and wrong-code return code:
   verified against the printer on 2026-10-01 (see "Client-slot decision");

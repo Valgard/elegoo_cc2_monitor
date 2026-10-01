@@ -29,10 +29,16 @@ final class AppModel {
     private let store = ConfigStore()
 
     init() {
-        connect(store.load() ?? importFromSlicer())
+        do {
+            connect(try store.load() ?? importFromSlicer())
+        } catch {
+            // A locked or denied keychain is not "no configuration": do not re-import over it.
+            importProblem = "Zugangscode im Schlüsselbund nicht lesbar."
+            connect(nil)
+        }
     }
 
-    var currentConnection: PrinterConnection? { store.load() }
+    var currentConnection: PrinterConnection? { try? store.load() }
 
     func save(_ connection: PrinterConnection) throws {
         try store.save(connection)

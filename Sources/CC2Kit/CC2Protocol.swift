@@ -43,8 +43,9 @@ public struct StatusDelta: Decodable, Equatable, Sendable {
 public struct AutoReport: Decodable, Sendable {
     public let id: Int
     public let method: Int
-    /// `nil` when the result does not have the expected shape (e.g. other report types);
-    /// the id still counts for gap detection.
+    /// `nil` when a known section has an unexpected type — the whole delta is then dropped, the
+    /// id still counts for gap detection. Other report types (6008) do decode; `StatusMerger`
+    /// ignores their fields by method.
     public let result: StatusDelta?
 
     enum CodingKeys: String, CodingKey {
@@ -64,10 +65,31 @@ public enum CC2Protocol {
         try? JSONDecoder().decode(AutoReport.self, from: data)
     }
 
-    /// Decodes the `result` of a `GetBasicInfo` response.
+    /// Decodes the `result` of a successful `GetBasicInfo` response; error answers
+    /// (`error_code` other than 0) and answers to other methods are not snapshots.
     public static func decodeSnapshot(_ data: Data) -> StatusDelta? {
-        struct Response: Decodable { let result: StatusDelta }
-        return try? JSONDecoder().decode(Response.self, from: data).result
+        struct Response: Decodable {
+            struct Status: Decodable {
+                let errorCode: Int?
+                enum CodingKeys: String, CodingKey { case errorCode = "error_code" }
+            }
+            let method: Int
+            let result: StatusDelta
+            let status: Status
+
+            enum CodingKeys: String, CodingKey { case method, result }
+
+            init(from decoder: any Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                method = try container.decode(Int.self, forKey: .method)
+                result = try container.decode(StatusDelta.self, forKey: .result)
+                status = try container.decode(Status.self, forKey: .result)
+            }
+        }
+        guard let response = try? JSONDecoder().decode(Response.self, from: data),
+            response.method == getBasicInfo, (response.status.errorCode ?? 0) == 0
+        else { return nil }
+        return response.result
     }
 }
 

@@ -10,6 +10,11 @@ final class MemorySecrets: SecretStore {
     func write(_ secret: String, account: String) throws { items.withLock { $0[account] = secret } }
 }
 
+struct FailingSecrets: SecretStore {
+    func read(account: String) throws -> String? { throw KeychainError(status: -25293) }
+    func write(_ secret: String, account: String) throws { throw KeychainError(status: -25293) }
+}
+
 private func freshDefaults() throws -> UserDefaults {
     try #require(UserDefaults(suiteName: "cc2-monitor-tests-\(UUID())"))
 }
@@ -20,14 +25,21 @@ struct ConfigStoreTests {
     @Test func roundTripWithMemorySecrets() throws {
         let store = ConfigStore(defaults: try freshDefaults(), secrets: MemorySecrets())
         try store.save(connection)
-        #expect(store.load() == connection)
+        #expect(try store.load() == connection)
     }
 
     @Test func loadReturnsNilWithoutCode() throws {
         let defaults = try freshDefaults()
         defaults.set("192.168.130.97", forKey: "printerHost")
         defaults.set("SN1", forKey: "printerSerial")
-        #expect(ConfigStore(defaults: defaults, secrets: MemorySecrets()).load() == nil)
+        #expect(try ConfigStore(defaults: defaults, secrets: MemorySecrets()).load() == nil)
+    }
+
+    @Test func keychainErrorIsNotMissingConfig() throws {
+        let defaults = try freshDefaults()
+        defaults.set("192.168.130.97", forKey: "printerHost")
+        defaults.set("SN1", forKey: "printerSerial")
+        #expect(throws: KeychainError.self) { try ConfigStore(defaults: defaults, secrets: FailingSecrets()).load() }
     }
 
     @Test func keychainRoundTrip() throws {

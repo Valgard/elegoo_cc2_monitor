@@ -37,7 +37,8 @@ public final class MQTTStatusClient: Sendable {
     private let connection: PrinterConnection
     private let clientId: String
     private let mode: RegistrationMode
-    private let inputs = Mutex<AsyncStream<Input>.Continuation?>(nil)
+    /// The running session's input, tagged so a finishing old session cannot clear a newer one's.
+    private let inputs = Mutex<(session: UUID, continuation: AsyncStream<Input>.Continuation)?>(nil)
 
     public init(connection: PrinterConnection, clientId: String, mode: RegistrationMode) {
         self.connection = connection
@@ -54,7 +55,7 @@ public final class MQTTStatusClient: Sendable {
 
     /// Asks the running session to resync (snapshot or brief registration, depending on the mode).
     public func requestResync() {
-        _ = inputs.withLock { $0?.yield(.resync) }
+        _ = inputs.withLock { $0?.continuation.yield(.resync) }
     }
 
     private func run(_ events: AsyncThrowingStream<StatusEvent, Error>.Continuation) async {
@@ -67,10 +68,11 @@ public final class MQTTStatusClient: Sendable {
                 version: .v3_1_1, keepAliveInterval: .seconds(30), timeout: .seconds(5),
                 userName: "elegoo", password: connection.accessCode))
         let (stream, input) = AsyncStream<Input>.makeStream()
-        inputs.withLock { $0 = input }
+        let session = UUID()
+        inputs.withLock { $0 = (session, input) }
         var timers: [Task<Void, Never>] = []
         defer {
-            inputs.withLock { $0 = nil }
+            inputs.withLock { if $0?.session == session { $0 = nil } }
             for timer in timers { timer.cancel() }
         }
 
@@ -87,7 +89,12 @@ public final class MQTTStatusClient: Sendable {
                     }
                     input.yield(.closed)
                 })
-            client.addCloseListener(named: "session") { _ in input.yield(.closed) }
+            client.addCloseListener(named: "session") { result in
+                if case .failure(let error) = result {
+                    Self.log.error("connection closed: \(String(describing: error), privacy: .public)")
+                }
+                input.yield(.closed)
+            }
             _ = try await client.subscribe(
                 to: [topics.status, topics.registerResponse, topics.response].map {
                     MQTTSubscribeInfo(topicFilter: $0, qos: .atLeastOnce)
@@ -103,7 +110,7 @@ public final class MQTTStatusClient: Sendable {
             return
         }
 
-        /// False when the printer did not acknowledge within the timeout: the link is dead.
+        /// False when the publish failed (no acknowledgement within the timeout, or no connection).
         func publish(_ topic: String, _ payload: Data) async -> Bool {
             do {
                 try await client.publish(to: topic, payload: ByteBuffer(bytes: payload), qos: .atLeastOnce)
@@ -141,7 +148,7 @@ public final class MQTTStatusClient: Sendable {
             return await requestSnapshot()
         }
 
-        // Liveness for every mode: registered sessions check PONGs, listen-only sessions MQTT pings.
+        // Liveness for every mode, see `Liveness.keepAlive`.
         timers.append(
             Task {
                 while !Task.isCancelled {
@@ -163,7 +170,11 @@ public final class MQTTStatusClient: Sendable {
                 if let report = CC2Protocol.decodeAutoReport(payload) { events.yield(.report(report)) }
             case .message(let topic, let payload) where topic == topics.registerResponse:
                 let outcome = CC2Protocol.parseRegisterResponse(payload)
-                if case .failed(let raw) = outcome { Self.log.error("registration failed: \(raw, privacy: .public)") }
+                switch outcome {
+                case .failed(let raw): Self.log.error("registration failed: \(raw, privacy: .public)")
+                case .tooManyClients: Self.log.notice("registration refused: too many clients, listening only")
+                case .registered: break
+                }
                 alive = await apply(registration.received(outcome))
             case .message(let topic, let payload) where topic == topics.response:
                 if CC2Protocol.isPong(payload) {
@@ -175,21 +186,27 @@ public final class MQTTStatusClient: Sendable {
                 continue
             case .registrationTimeout:
                 if let step = registration.timedOut() {
-                    Self.log.error("registration timed out after 5 s")
+                    Self.log.error("registration timed out after \(Self.registrationTimeout, privacy: .public)")
                     alive = await apply(step)
                 }
             case .retryRegistration:
+                registration.retryFired()
                 if !registration.isRegistered { alive = await register() }
             case .pingTick:
-                if registration.isRegistered, mode == .stay {
-                    if Liveness.pongOverdue(lastPong: lastPong, now: .now, interval: Self.pingInterval) {
-                        Self.log.error("no PONG for three intervals, dropping the session")
+                let overdue = Liveness.pongOverdue(lastPong: lastPong, now: .now, interval: Self.pingInterval)
+                switch Liveness.keepAlive(mode: mode, registered: registration.isRegistered, pongOverdue: overdue) {
+                case .appPing:
+                    alive = await publish(topics.request, CC2Protocol.ping)
+                case .mqttPing:
+                    do {
+                        try await client.ping()
+                    } catch {
+                        Self.log.error("MQTT ping failed: \(String(describing: error), privacy: .public)")
                         alive = false
-                    } else {
-                        alive = await publish(topics.request, CC2Protocol.ping)
                     }
-                } else {
-                    do { try await client.ping() } catch { alive = false }
+                case .dropSession:
+                    Self.log.error("no PONG for three PING intervals, dropping the session")
+                    alive = false
                 }
             case .resync:
                 switch mode {

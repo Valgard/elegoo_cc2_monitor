@@ -39,12 +39,21 @@ public enum SlicerImport {
             let serial = entry["serialNumber"] as? String, !serial.isEmpty,
             let code = entry["accessCode"] as? String, !code.isEmpty
         else { throw .incompleteEntry }
-        return PrinterConnection(host: host, serialNumber: serial, accessCode: code)
+        let connection = PrinterConnection(host: host, serialNumber: serial, accessCode: code)
+        guard connection.cameraURL != nil else { throw .incompleteEntry }
+        return connection
     }
 
     private static func lastActive(_ entry: [String: Any]) -> Int {
         (entry["lastActiveTime"] as? NSNumber)?.intValue ?? 0
     }
+}
+
+extension PrinterConnection: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    /// Never shows the access code, so logging or interpolating a connection cannot leak it.
+    public var description: String { "PrinterConnection(host: \(host), serialNumber: \(serialNumber))" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: ["host": host, "serialNumber": serialNumber]) }
 }
 
 extension PrinterConnection {

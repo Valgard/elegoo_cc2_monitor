@@ -12,8 +12,9 @@ open .build/CC2Monitor.app
 ```
 
 Requires macOS 26 and Xcode 27 / Swift 6.4. On first launch macOS asks for
-local-network access, and the keychain asks once whether the app may read its
-stored access code.
+local-network access, and the keychain asks whether the app may read its
+stored access code. The bundle is ad-hoc signed, so the keychain asks again
+after every rebuild.
 
 ## Credentials
 

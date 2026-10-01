@@ -81,6 +81,33 @@ struct PrinterMonitorTests {
         #expect(source.resyncs.withLock { $0 } == 1)
     }
 
+    @Test func gapKeepsFieldsWhenRegistered() throws {
+        let m = monitor(ScriptedSource([]))
+        m.handle(.channel(.online))
+        m.handle(try report(id: 10, #"{"print_status":{"filename":"x.gcode"}}"#))
+        m.handle(try report(id: 12))
+        #expect(m.status.fileName == "x.gcode")
+    }
+
+    @Test func headlineStatusOfflineWhileCameraLive() async throws {
+        let frame = try #require(
+            CGContext(
+                data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )?.makeImage())
+        let m = PrinterMonitor(
+            mode: .stay, retryInterval: .seconds(60), source: ScriptedSource([], ending: nil),
+            frames: {
+                AsyncThrowingStream { continuation in continuation.yield(frame) }
+            })
+        m.start()
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(m.camera == .live)
+        #expect(m.status.channel == .offline)
+        #expect(m.headline == "Status offline")
+        m.stop()
+    }
+
     @Test func snapshotApplied() throws {
         let m = monitor(ScriptedSource([]))
         m.handle(try report(id: 1, #"{"print_status":{"filename":"old.gcode"}}"#))

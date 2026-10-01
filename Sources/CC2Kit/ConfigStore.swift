@@ -61,10 +61,12 @@ public struct ConfigStore {
         self.secrets = secrets
     }
 
-    public func load() -> PrinterConnection? {
+    /// `nil` when nothing is stored; throws when the keychain cannot be read, so a locked or
+    /// denied keychain is not mistaken for "no configuration".
+    public func load() throws -> PrinterConnection? {
         guard let host = defaults.string(forKey: "printerHost"),
             let serial = defaults.string(forKey: "printerSerial"),
-            let code = try? secrets.read(account: serial)
+            let code = try secrets.read(account: serial)
         else { return nil }
         return PrinterConnection(host: host, serialNumber: serial, accessCode: code)
     }

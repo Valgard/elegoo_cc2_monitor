@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import Observation
+import os
 
 /// Where status events come from; `MQTTStatusClient` in the app, scripted sources in tests.
 public protocol StatusSource: Sendable {
@@ -34,6 +35,7 @@ public final class PrinterMonitor {
         }
     }
 
+    private static let log = Logger(subsystem: "cc2-monitor", category: "monitor")
     private let mode: RegistrationMode
     private let retryInterval: Duration
     private let frames: @Sendable () -> AsyncThrowingStream<CGImage, Error>
@@ -118,9 +120,12 @@ public final class PrinterMonitor {
             do {
                 for try await event in source.session() { handle(event) }
             } catch MQTTStatusClient.SessionError.authFailed {
+                Self.log.error("printer rejected the access code; not retrying until the settings change")
                 handle(.channel(.authFailed))
                 return  // no retry until the settings change and the monitor is restarted
-            } catch {}
+            } catch {
+                Self.log.notice("status session ended: \(String(describing: error), privacy: .public)")
+            }
             guard !Task.isCancelled else { return }
             handle(.channel(.offline))
             try? await Task.sleep(for: retryInterval)
@@ -134,7 +139,9 @@ public final class PrinterMonitor {
                     latestFrame = frame
                     camera = .live
                 }
-            } catch {}
+            } catch {
+                Self.log.notice("camera stream ended: \(String(describing: error), privacy: .public)")
+            }
             guard !Task.isCancelled else { return }
             camera = .reconnecting
             try? await Task.sleep(for: retryInterval)

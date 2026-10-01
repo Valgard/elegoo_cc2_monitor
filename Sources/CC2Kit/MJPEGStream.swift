@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import ImageIO
+import os
 
 /// Assembles the parts URLSession delivers for a `multipart/x-mixed-replace` response.
 ///
@@ -48,8 +49,10 @@ public enum MJPEGStream {
         }
     }
 
-    /// Callbacks arrive on the session's serial delegate queue, so the collector needs no lock.
+    /// All callbacks used here are the completion-handler/void variants, which URLSession calls on
+    /// its serial delegate queue — so the collector needs no lock.
     private final class Delegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+        private static let log = Logger(subsystem: "cc2-monitor", category: "camera")
         private let continuation: AsyncThrowingStream<CGImage, Error>.Continuation
         private var collector = MJPEGPartCollector()
 
@@ -58,13 +61,16 @@ public enum MJPEGStream {
         }
 
         func urlSession(
-            _ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse
-        ) async -> URLSession.ResponseDisposition {
+            _ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+            completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void
+        ) {
             if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                return .cancel
+                Self.log.error("camera answered HTTP \(http.statusCode, privacy: .public)")
+                completionHandler(.cancel)
+                return
             }
             emit(collector.beginPart(expectedLength: response.expectedContentLength))
-            return .allow
+            completionHandler(.allow)
         }
 
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
