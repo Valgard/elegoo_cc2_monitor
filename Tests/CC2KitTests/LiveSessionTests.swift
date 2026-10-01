@@ -25,6 +25,22 @@ struct LiveSessionTests {
         #expect(snapshot?.machineStatus?.status != nil)
     }
 
+    @Test func cameraDeliversFrames() async throws {
+        let connection = try SlicerImport.importConnection(from: SlicerImport.defaultURL)
+        let url = try #require(URL(string: "http://\(connection.host):8080/"))
+        var count = 0
+        let deadline = ContinuousClock.now + .seconds(3)
+        do {
+            for try await _ in MJPEGStream.frames(from: url) {
+                count += 1
+                if ContinuousClock.now > deadline { break }
+            }
+        } catch {
+            Issue.record("stream ended with \(error) after \(count) frames")
+        }
+        #expect(count >= 5)
+    }
+
     @Test func wrongCodeFailsAuth() async {
         var connection = try! SlicerImport.importConnection(from: SlicerImport.defaultURL)
         connection.accessCode = "000000"

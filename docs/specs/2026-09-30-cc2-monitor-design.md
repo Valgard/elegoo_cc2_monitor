@@ -144,8 +144,8 @@ SwiftPM, pinned to the stable 2.x line (`from: "2.13.0"`), not the
 | Unit | Responsibility | Depends on |
 |---|---|---|
 | `PrinterConfig` | Host, serial number, access code. Imports from ElegooSlicer's `~/Library/Application Support/ElegooSlicer/user/printer_list.json` (a JSON object keyed by printer UUID; the entry whose `printerModel` contains "Centauri Carbon 2", and among several such entries the one with the latest `lastActiveTime`; `isAdded` is ignored — it is `false` on the real CC2 entry); the import fails if the file is missing or unparseable, has no CC2 entry, or that entry lacks `host`, `serialNumber` or a non-empty `accessCode`; persists host and serial in `UserDefaults`, the access code in the Keychain. | Foundation, Security |
-| `MJPEGParser` | Pure byte-stream parser: feed chunks, get complete JPEG frames out. Handles frames split across chunks and several frames in one chunk. | nothing |
-| `MJPEGStream` | Opens the camera URL with `URLSession` bytes, feeds `MJPEGParser`, exposes `AsyncStream<CGImage>`. | `URLSession`, `MJPEGParser` |
+| `MJPEGPartCollector` | Pure assembler for the parts URLSession delivers: URLSession splits a `multipart/x-mixed-replace` response itself (each part arrives as a new response, boundary lines removed — measured 2026-10-01). A part is a frame once its announced length is reached; incomplete parts are dropped. | nothing |
+| `MJPEGStream` | Opens the camera URL with a `URLSession` data task and a delegate, feeds `MJPEGPartCollector`, exposes `AsyncThrowingStream<CGImage, Error>`. (The async `bytes(for:)` API fails on multipart responses with `NSURLErrorDomain -1`.) | `URLSession`, `MJPEGPartCollector` |
 | `PrinterStatus` | Value type: machine state, progress %, current/total layer, remaining seconds, file name, nozzle and bed temperature, last seen `api_status` id, status-channel state (`connecting`, `online`, `limited`, `registrationFailed`, `offline`, `authFailed`). All print fields optional ("unknown until seen"). | nothing |
 | `StatusMerger` | Pure functions: `merge(PrinterStatus, delta) -> PrinterStatus` (absent field = unchanged), `apply(PrinterStatus, snapshot) -> PrinterStatus` for the `GetBasicInfo` response, `resetPrintFields(PrinterStatus)` (sets every print field — state, progress, layers, remaining time, file name, both temperatures — to unknown; connection states untouched), and `hasGap(lastId, newId) -> Bool` (`newId - lastId > 1`, over the ids of all auto-report methods, 6000 and 6008). | nothing |
 | `MQTTStatusClient` | Connects via `mqtt-nio`, subscribes to `api_status`, registers, requests the `GetBasicInfo` snapshot, sends `PING` while registered. Registration mode is **stay** (measured, see "Client-slot decision"); `brief`/`never` remain available as fallbacks. `"ok"`/`"already registered"` = registered; `"too many clients"` → `limited`; registration timeout or an unexpected response → `registrationFailed` (also listen-only, but logged with the raw response, so a wrong payload is not mistaken for a full printer). Emits decoded messages as an `AsyncStream`. | `mqtt-nio` |
@@ -205,8 +205,10 @@ keeps working.
   change one nested field, `hasGap` on consecutive and skipped ids and on
   interleaved 6000/6008 ids, `resetPrintFields`, and the `GetBasicInfo`
   snapshot once its format is recorded.
-- `MJPEGParser`: unit tests for one frame per chunk, frame split across two
-  chunks, two frames in one chunk, garbage before the first boundary.
+- `MJPEGPartCollector`: unit tests for a part completed by its announced
+  length, a part without length completed by the next part, an incomplete part
+  dropped, an empty part. `MJPEGStream` itself: live test against the printer
+  (`CC2_LIVE=1`).
 - `PrinterConfig`: import from a fixture copy of `printer_list.json` (with a
   dummy access code), missing file, unparseable file, file without a CC2
   entry, CC2 entry with empty `accessCode`, `isAdded: false` still imported,
