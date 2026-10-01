@@ -23,6 +23,7 @@ public final class MQTTStatusClient: Sendable {
     private enum Input: Sendable {
         case message(topic: String, payload: Data)
         case registrationTimeout
+        case retryRegistration
         case pingTick
         case resync
         case closed
@@ -31,6 +32,7 @@ public final class MQTTStatusClient: Sendable {
     private static let log = Logger(subsystem: "cc2-monitor", category: "mqtt")
     private static let pingInterval = Duration.seconds(10)
     private static let registrationTimeout = Duration.seconds(5)
+    private static let registrationRetry = Duration.seconds(60)
 
     private let connection: PrinterConnection
     private let clientId: String
@@ -57,10 +59,13 @@ public final class MQTTStatusClient: Sendable {
 
     private func run(_ events: AsyncThrowingStream<StatusEvent, Error>.Continuation) async {
         let topics = CC2Protocol.Topics(serial: connection.serialNumber, clientId: clientId)
+        // A timeout makes publishes and MQTT pings fail fast on a dead link instead of waiting forever.
         let client = MQTTClient(
             host: connection.host, port: 1883, identifier: clientId,
             eventLoopGroupProvider: .shared(MultiThreadedEventLoopGroup.singleton),
-            configuration: .init(version: .v3_1_1, userName: "elegoo", password: connection.accessCode))
+            configuration: .init(
+                version: .v3_1_1, keepAliveInterval: .seconds(30), timeout: .seconds(5),
+                userName: "elegoo", password: connection.accessCode))
         let (stream, input) = AsyncStream<Input>.makeStream()
         inputs.withLock { $0 = input }
         var timers: [Task<Void, Never>] = []
@@ -98,8 +103,15 @@ public final class MQTTStatusClient: Sendable {
             return
         }
 
-        func publish(_ topic: String, _ payload: Data) async {
-            try? await client.publish(to: topic, payload: ByteBuffer(bytes: payload), qos: .atLeastOnce)
+        /// False when the printer did not acknowledge within the timeout: the link is dead.
+        func publish(_ topic: String, _ payload: Data) async -> Bool {
+            do {
+                try await client.publish(to: topic, payload: ByteBuffer(bytes: payload), qos: .atLeastOnce)
+                return true
+            } catch {
+                Self.log.error("publish failed: \(String(describing: error), privacy: .public)")
+                return false
+            }
         }
         func after(_ delay: Duration, _ value: Input) {
             timers.append(
@@ -108,73 +120,87 @@ public final class MQTTStatusClient: Sendable {
                     if !Task.isCancelled { input.yield(value) }
                 })
         }
-        var awaitingRegistration = false
-        var registered = false
+        var registration = RegistrationTracker()
         var nextRequestId = 1
-        func register() async {
-            awaitingRegistration = true
-            await publish(topics.register, CC2Protocol.registerPayload(clientId: clientId))
+        var lastPong = ContinuousClock.now
+        func register() async -> Bool {
+            registration.sent()
             after(Self.registrationTimeout, .registrationTimeout)
+            return await publish(topics.register, CC2Protocol.registerPayload(clientId: clientId))
         }
-        func requestSnapshot() async {
-            await publish(topics.request, CC2Protocol.snapshotRequest(id: nextRequestId))
-            nextRequestId += 1
+        func requestSnapshot() async -> Bool {
+            defer { nextRequestId += 1 }
+            return await publish(topics.request, CC2Protocol.snapshotRequest(id: nextRequestId))
+        }
+        func apply(_ step: RegistrationTracker.Step?) async -> Bool {
+            guard let step else { return true }
+            events.yield(.channel(step.channel))
+            if step.retry { after(Self.registrationRetry, .retryRegistration) }
+            guard step.channel == .online else { return true }
+            lastPong = .now
+            return await requestSnapshot()
         }
 
+        // Liveness for every mode: registered sessions check PONGs, listen-only sessions MQTT pings.
+        timers.append(
+            Task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: Self.pingInterval)
+                    input.yield(.pingTick)
+                }
+            })
+
+        var alive = true
         if mode == .never {
             events.yield(.channel(.limited))
         } else {
-            await register()
+            alive = await register()
         }
 
-        loop: for await item in stream {
+        loop: for await item in stream where alive {
             switch item {
             case .message(let topic, let payload) where topic == topics.status:
                 if let report = CC2Protocol.decodeAutoReport(payload) { events.yield(.report(report)) }
             case .message(let topic, let payload) where topic == topics.registerResponse:
-                guard awaitingRegistration else { continue }
-                awaitingRegistration = false
-                switch CC2Protocol.parseRegisterResponse(payload) {
-                case .registered:
-                    let first = !registered
-                    registered = true
-                    events.yield(.channel(.online))
-                    await requestSnapshot()
-                    if mode == .stay, first {
-                        timers.append(
-                            Task {
-                                while !Task.isCancelled {
-                                    try? await Task.sleep(for: Self.pingInterval)
-                                    input.yield(.pingTick)
-                                }
-                            })
-                    }
-                case .tooManyClients:
-                    events.yield(.channel(.limited))
-                case .failed(let raw):
-                    Self.log.error("registration failed: \(raw, privacy: .public)")
-                    events.yield(.channel(.registrationFailed))
-                }
+                let outcome = CC2Protocol.parseRegisterResponse(payload)
+                if case .failed(let raw) = outcome { Self.log.error("registration failed: \(raw, privacy: .public)") }
+                alive = await apply(registration.received(outcome))
             case .message(let topic, let payload) where topic == topics.response:
-                if let snapshot = CC2Protocol.decodeSnapshot(payload) { events.yield(.snapshot(snapshot)) }
+                if CC2Protocol.isPong(payload) {
+                    lastPong = .now
+                } else if let snapshot = CC2Protocol.decodeSnapshot(payload) {
+                    events.yield(.snapshot(snapshot))
+                }
             case .message:
                 continue
             case .registrationTimeout:
-                guard awaitingRegistration else { continue }
-                awaitingRegistration = false
-                Self.log.error("registration timed out after 5 s")
-                events.yield(.channel(.registrationFailed))
+                if let step = registration.timedOut() {
+                    Self.log.error("registration timed out after 5 s")
+                    alive = await apply(step)
+                }
+            case .retryRegistration:
+                if !registration.isRegistered { alive = await register() }
             case .pingTick:
-                if registered { await publish(topics.request, CC2Protocol.ping) }
+                if registration.isRegistered, mode == .stay {
+                    if Liveness.pongOverdue(lastPong: lastPong, now: .now, interval: Self.pingInterval) {
+                        Self.log.error("no PONG for three intervals, dropping the session")
+                        alive = false
+                    } else {
+                        alive = await publish(topics.request, CC2Protocol.ping)
+                    }
+                } else {
+                    do { try await client.ping() } catch { alive = false }
+                }
             case .resync:
                 switch mode {
-                case .stay where registered: await requestSnapshot()
-                case .brief: await register()
+                case .stay where registration.isRegistered: alive = await requestSnapshot()
+                case .brief: alive = await register()
                 default: break
                 }
             case .closed:
                 break loop
             }
+            if !alive { break loop }
         }
         try? await client.shutdown()
         events.finish(throwing: Task.isCancelled ? nil : SessionError.disconnected)

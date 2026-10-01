@@ -20,6 +20,9 @@ struct SettingsSheet: View {
             TextField("Host", text: $host)
             TextField("Seriennummer", text: $serialNumber)
             SecureField("Zugangscode", text: $accessCode)
+            if !host.isEmpty, candidate.cameraURL == nil {
+                Text("Nur Hostname oder IP-Adresse, ohne Port und ohne Leerzeichen.").foregroundStyle(.red)
+            }
             if let saveError {
                 Text(saveError).foregroundStyle(.red)
             }
@@ -33,7 +36,7 @@ struct SettingsSheet: View {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Sichern") { save() }
                     .disabled(
-                        [host, serialNumber, accessCode].contains { $0.trimmingCharacters(in: .whitespaces).isEmpty })
+                        candidate.cameraURL == nil || candidate.serialNumber.isEmpty || candidate.accessCode.isEmpty)
             }
         }
         .onAppear {
@@ -44,13 +47,16 @@ struct SettingsSheet: View {
         }
     }
 
-    private func save() {
-        let connection = PrinterConnection(
+    private var candidate: PrinterConnection {
+        PrinterConnection(
             host: host.trimmingCharacters(in: .whitespaces),
             serialNumber: serialNumber.trimmingCharacters(in: .whitespaces),
             accessCode: accessCode.trimmingCharacters(in: .whitespaces))
+    }
+
+    private func save() {
         do {
-            try model.save(connection)
+            try model.save(candidate)
             dismiss()
         } catch {
             saveError = "Speichern im Schlüsselbund fehlgeschlagen."

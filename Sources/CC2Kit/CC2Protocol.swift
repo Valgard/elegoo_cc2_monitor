@@ -99,6 +99,7 @@ extension CC2Protocol {
     }
 
     public static let getBasicInfo = 1002
+    public static let messageAutoReport = 6000
 
     /// `cc2mon` + 8 hex digits — accepted by the printer and recognisable among its clients.
     public static func newClientId() -> String {

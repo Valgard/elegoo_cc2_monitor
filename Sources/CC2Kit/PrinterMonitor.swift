@@ -46,11 +46,15 @@ public final class PrinterMonitor {
         connection: PrinterConnection, clientId: String, mode: RegistrationMode = .default,
         retryInterval: Duration = .seconds(5)
     ) {
-        let cameraURL = URL(string: "http://\(connection.host):8080/")!
         self.init(
             mode: mode, retryInterval: retryInterval,
             source: MQTTStatusClient(connection: connection, clientId: clientId, mode: mode),
-            frames: { MJPEGStream.frames(from: cameraURL) })
+            frames: {
+                guard let url = connection.cameraURL else {
+                    return AsyncThrowingStream { $0.finish(throwing: URLError(.badURL)) }
+                }
+                return MJPEGStream.frames(from: url)
+            })
     }
 
     init(
@@ -76,6 +80,12 @@ public final class PrinterMonitor {
 
     func handle(_ event: StatusEvent) {
         switch event {
+        case .channel(.offline):
+            status.channel = .offline
+            status.lastReportId = nil
+            reconnected = true
+        case .channel(.connecting) where reconnected:
+            break  // keep showing "offline" until the new session knows more
         case .channel(let state):
             status.channel = state
             if reconnected, state != .connecting {
@@ -113,8 +123,6 @@ public final class PrinterMonitor {
             } catch {}
             guard !Task.isCancelled else { return }
             handle(.channel(.offline))
-            status.lastReportId = nil
-            reconnected = true
             try? await Task.sleep(for: retryInterval)
         }
     }

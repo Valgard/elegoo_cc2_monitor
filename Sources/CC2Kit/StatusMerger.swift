@@ -14,14 +14,24 @@ public enum StatusMerger {
         s.remainingSeconds = delta.printStatus?.remainingTimeSec ?? s.remainingSeconds
         if let filename = delta.printStatus?.filename {
             // An idle printer reports "": no file, which is not the same as "unchanged".
-            s.fileName = filename.isEmpty ? nil : filename
+            let newName = filename.isEmpty ? nil : filename
+            if let previous = s.fileName, newName != previous {
+                // A new job: the previous job's layer counts no longer apply.
+                s.currentLayer = delta.printStatus?.currentLayer
+                s.totalLayers = delta.printStatus?.totalLayers
+            }
+            s.fileName = newName
         }
         return s
     }
 
-    /// Merges a report's fields (if any) and records its id.
+    /// Records a report's id; only `MessageAutoReport` (6000) carries status fields —
+    /// `SystemAutoReport` (6008) shares the id sequence but not the meaning of its sections.
     public static func merge(_ status: PrinterStatus, report: AutoReport) -> PrinterStatus {
-        var s = report.result.map { merge(status, $0) } ?? status
+        var s = status
+        if report.method == CC2Protocol.messageAutoReport, let result = report.result {
+            s = merge(status, result)
+        }
         s.lastReportId = report.id
         return s
     }

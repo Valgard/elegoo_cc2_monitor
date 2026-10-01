@@ -46,3 +46,17 @@ public enum SlicerImport {
         (entry["lastActiveTime"] as? NSNumber)?.intValue ?? 0
     }
 }
+
+extension PrinterConnection {
+    /// The camera stream, or `nil` when `host` is not a plain host name or IPv4 address
+    /// (e.g. "192.168.1.5:1883" or "my printer" typed into the settings).
+    public var cameraURL: URL? {
+        guard host.wholeMatch(of: /[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?/) != nil else { return nil }
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = host
+        components.port = 8080
+        components.path = "/"
+        return components.url
+    }
+}
