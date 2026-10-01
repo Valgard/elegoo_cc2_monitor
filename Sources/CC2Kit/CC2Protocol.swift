@@ -70,3 +70,63 @@ public enum CC2Protocol {
         return try? JSONDecoder().decode(Response.self, from: data).result
     }
 }
+
+/// Answer to `api_register`.
+public enum RegistrationOutcome: Equatable, Sendable {
+    /// `"ok"` or `"already registered"` (a registration survives a dropped connection).
+    case registered
+    /// `"too many clients"`: the printer's client slots (about 10) are full.
+    case tooManyClients
+    /// Anything else, kept raw for the log.
+    case failed(raw: String)
+}
+
+extension CC2Protocol {
+    public struct Topics: Sendable {
+        public let status: String
+        public let register: String
+        public let registerResponse: String
+        public let request: String
+        public let response: String
+
+        public init(serial: String, clientId: String) {
+            status = "elegoo/\(serial)/api_status"
+            register = "elegoo/\(serial)/api_register"
+            registerResponse = "elegoo/\(serial)/\(clientId)/register_response"
+            request = "elegoo/\(serial)/\(clientId)/api_request"
+            response = "elegoo/\(serial)/\(clientId)/api_response"
+        }
+    }
+
+    public static let getBasicInfo = 1002
+
+    /// `cc2mon` + 8 hex digits — accepted by the printer and recognisable among its clients.
+    public static func newClientId() -> String {
+        "cc2mon" + String(format: "%08x", UInt32.random(in: .min ... .max))
+    }
+
+    /// The printer only answers when both ids are present (and the message is sent with QoS 1).
+    public static func registerPayload(clientId: String) -> Data {
+        Data(#"{"request_id":"\#(clientId)","client_id":"\#(clientId)"}"#.utf8)
+    }
+
+    public static func snapshotRequest(id: Int) -> Data {
+        Data(#"{"id":\#(id),"method":\#(getBasicInfo),"params":{}}"#.utf8)
+    }
+
+    public static let ping = Data(#"{"type":"PING"}"#.utf8)
+
+    public static func parseRegisterResponse(_ data: Data) -> RegistrationOutcome {
+        struct Response: Decodable { let error: String }
+        switch (try? JSONDecoder().decode(Response.self, from: data))?.error {
+        case "ok", "already registered": return .registered
+        case "too many clients": return .tooManyClients
+        default: return .failed(raw: String(decoding: data, as: UTF8.self))
+        }
+    }
+
+    public static func isPong(_ data: Data) -> Bool {
+        struct Message: Decodable { let type: String? }
+        return (try? JSONDecoder().decode(Message.self, from: data))?.type == "PONG"
+    }
+}
